@@ -1,6 +1,5 @@
 from django.db import models
 
-from django.db import models
 
 class Customer(models.Model):
     customer_id = models.CharField(max_length=50, unique=True)
