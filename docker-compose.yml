@@ -28,5 +28,16 @@ services:
     ports:
       - "6379:6379"
 
+  worker:
+    build: .
+    command: celery -A credit_system worker -l info
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+      - redis
+    env_file:
+      - .env
+
 volumes:
   postgres_data:

@@ -1,2 +1,29 @@
-/venv
-.env 
+# Python
+credit_system/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+
+# Virtual environment
+venv/
+.env
+
+# Django specific
+db.sqlite3
+media/
+staticfiles/
+
+# Logs
+*.log
+
+# IDE settings
+.vscode/
+.idea/
+
+# Docker volumes (not Docker files!)
+postgres_data/
+
+# OS-specific
+.DS_Store
+Thumbs.db
