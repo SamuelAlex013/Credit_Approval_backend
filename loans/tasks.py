@@ -1,7 +1,6 @@
 from celery import shared_task
 import pandas as pd
-from django.conf import settings
-from django.db import transaction
+from django.db import transaction, connection
 from collections import defaultdict
 from .models import Customer, Loan
 
@@ -19,14 +18,14 @@ def ingest_customer_data(file_path):
         customers_to_update = []
 
         for _, row in df.iterrows():
-            customer_id = row['Customer ID']
+            customer_id = int(row['Customer ID'])
             data = {
                 'first_name': row['First Name'],
                 'last_name': row['Last Name'],
-                'age': row['Age'],
+                'age': int(row['Age']),
                 'phone_number': str(row['Phone Number']),
-                'monthly_salary': row['Monthly Salary'],
-                'approved_limit': row['Approved Limit'],
+                'monthly_salary': int(row['Monthly Salary']),
+                'approved_limit': int(row['Approved Limit']),
             }
             if customer_id in existing_dict:
                 cust = existing_dict[customer_id]
@@ -39,14 +38,19 @@ def ingest_customer_data(file_path):
         if customers_to_update:
             Customer.objects.bulk_update(
                 customers_to_update,
-                fields=[
-                    'first_name', 'last_name', 'age', 'phone_number',
-                    'monthly_salary', 'approved_limit'
-                ]
+                fields=['first_name', 'last_name', 'age', 'phone_number',
+                        'monthly_salary', 'approved_limit']
             )
 
         if customers_to_create:
             Customer.objects.bulk_create(customers_to_create)
+
+            # Reset sequence to avoid primary key conflict
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT setval(pg_get_serial_sequence('"loans_customer"', 'customer_id'),
+                                  (SELECT COALESCE(MAX(customer_id), 1) FROM loans_customer));
+                """)
 
         return "Customer data ingested successfully."
     except Exception as e:
@@ -65,9 +69,8 @@ def ingest_loan_data(file_path):
             loan_ids = df['Loan ID'].tolist()
             customer_ids = df['Customer ID'].unique()
 
-            # Delete existing loans
+            # Delete existing loans for these IDs
             deleted_count = Loan.objects.filter(loan_id__in=loan_ids).delete()[0]
-            print(f"Deleted {deleted_count} loans")
 
             # Fetch customers
             customers = Customer.objects.filter(customer_id__in=customer_ids)
@@ -78,12 +81,11 @@ def ingest_loan_data(file_path):
             customer_debts = defaultdict(int)
 
             for _, row in df.iterrows():
-                customer_id = row['Customer ID']
+                customer_id = int(row['Customer ID'])
                 customer = customer_dict.get(customer_id)
                 if not customer:
                     continue
 
-                # Calculate remaining debt
                 emis_paid = int(row['EMIs paid on Time'])
                 monthly_payment = int(row['Monthly payment'])
                 total_tenure = int(row['Tenure'])
@@ -91,7 +93,7 @@ def ingest_loan_data(file_path):
 
                 loan_list.append(
                     Loan(
-                        loan_id=row['Loan ID'],
+                        loan_id=int(row['Loan ID']),
                         loan_amount=row['Loan Amount'],
                         tenure=row['Tenure'],
                         interest_rate=row['Interest Rate'],
@@ -104,8 +106,15 @@ def ingest_loan_data(file_path):
                 )
                 customer_debts[customer_id] += remaining_debt
 
-            # Bulk create loans
-            Loan.objects.bulk_create(loan_list)
+            if loan_list:
+                Loan.objects.bulk_create(loan_list)
+
+                # Reset sequence for Loan table
+                with connection.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT setval(pg_get_serial_sequence('"loans_loan"', 'loan_id'),
+                                      (SELECT COALESCE(MAX(loan_id), 1) FROM loans_loan));
+                    """)
 
             # Update customer debt
             customers_to_update = []
@@ -114,7 +123,8 @@ def ingest_loan_data(file_path):
                 customer.current_debt = debt
                 customers_to_update.append(customer)
 
-            Customer.objects.bulk_update(customers_to_update, ['current_debt'])
+            if customers_to_update:
+                Customer.objects.bulk_update(customers_to_update, ['current_debt'])
 
             return {
                 "status": "success",
