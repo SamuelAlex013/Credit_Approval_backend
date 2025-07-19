@@ -1,5 +1,6 @@
 # Python
 credit_system/__pycache__/
+loans/__pycache__/
 *.py[cod]
 *.pyo
 *.pyd
