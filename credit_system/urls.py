@@ -21,4 +21,5 @@ from django.urls import path
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('register/', views.register_customer, name='register'),
+    path('check_eligibility/', views.check_eligibility, name='check_eligibility'),
 ]
