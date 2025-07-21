@@ -507,3 +507,234 @@ class IntegrationTest(TestCase):
         # Should be approved due to good payment history
         self.assertTrue(result['approval'])
         self.assertGreater(result['monthly_installment'], 0)
+
+
+class CreateLoanViewTest(TestCase):
+    """Test cases for create loan view"""
+    
+    def setUp(self):
+        self.client = Client()
+        self.url = reverse('create_loan')
+        self.customer = Customer.objects.create(
+            first_name='Loan',
+            last_name='Applicant',
+            age=35,
+            phone_number='1234567890',
+            monthly_salary=100000,
+            approved_limit=3600000,
+            current_debt=0
+        )
+        
+        self.valid_request = {
+            'customer_id': self.customer.customer_id,
+            'loan_amount': 500000,
+            'interest_rate': 10.0,
+            'tenure': 24
+        }
+    
+    def test_create_loan_success(self):
+        """Test successful loan creation for eligible customer"""
+        response = self.client.post(
+            self.url,
+            data=json.dumps(self.valid_request),
+            content_type='application/json'
+        )
+        
+        self.assertEqual(response.status_code, 201)
+        response_data = json.loads(response.content)
+        
+        self.assertIsNotNone(response_data['loan_id'])
+        self.assertEqual(response_data['customer_id'], self.customer.customer_id)
+        self.assertTrue(response_data['loan_approved'])
+        self.assertEqual(response_data['message'], 'Loan approved and created successfully')
+        self.assertGreater(response_data['monthly_installment'], 0)
+        
+        # Verify loan was created in database
+        loan = Loan.objects.get(loan_id=response_data['loan_id'])
+        self.assertEqual(loan.customer, self.customer)
+        self.assertEqual(loan.loan_amount, 500000)
+        self.assertEqual(loan.tenure, 24)
+        # New customer has credit score = 50, which falls in condition 30 < score <= 50
+        # So interest rate gets corrected to 12% if original rate < 12%
+        self.assertEqual(loan.interest_rate, 12.0)  
+        
+        # Verify customer debt was updated
+        self.customer.refresh_from_db()
+        self.assertEqual(self.customer.current_debt, 500000)
+    
+    def test_create_loan_customer_not_found(self):
+        """Test loan creation for non-existent customer"""
+        invalid_request = self.valid_request.copy()
+        invalid_request['customer_id'] = 99999
+        
+        response = self.client.post(
+            self.url,
+            data=json.dumps(invalid_request),
+            content_type='application/json'
+        )
+        
+        self.assertEqual(response.status_code, 404)
+        response_data = json.loads(response.content)
+        self.assertEqual(response_data['error'], 'Customer not found')
+    
+    def test_create_loan_overutilized_customer(self):
+        """Test loan creation for overutilized customer"""
+        self.customer.current_debt = 4000000  # More than approved limit
+        self.customer.save()
+        
+        response = self.client.post(
+            self.url,
+            data=json.dumps(self.valid_request),
+            content_type='application/json'
+        )
+        
+        self.assertEqual(response.status_code, 200)
+        response_data = json.loads(response.content)
+        
+        self.assertIsNone(response_data['loan_id'])
+        self.assertFalse(response_data['loan_approved'])
+        self.assertEqual(response_data['message'], 'Loan not approved due to overutilized credit limit')
+        self.assertEqual(response_data['monthly_installment'], 0.0)
+        
+        # Verify no loan was created
+        self.assertEqual(Loan.objects.count(), 0)
+    
+    def test_create_loan_high_emi_burden(self):
+        """Test loan creation for customer with high EMI burden"""
+        # Create existing loan with high monthly repayment
+        Loan.objects.create(
+            customer=self.customer,
+            loan_amount=2000000,
+            tenure=36,
+            interest_rate=12.0,
+            monthly_repayment=60000,  # 60% of 100000 salary
+            emis_paid_on_time=12,
+            start_date=date(2024, 1, 1),
+            end_date=date(2026, 12, 31)
+        )
+        
+        response = self.client.post(
+            self.url,
+            data=json.dumps(self.valid_request),
+            content_type='application/json'
+        )
+        
+        self.assertEqual(response.status_code, 200)
+        response_data = json.loads(response.content)
+        
+        self.assertIsNone(response_data['loan_id'])
+        self.assertFalse(response_data['loan_approved'])
+        self.assertEqual(response_data['message'], 'Loan not approved due to existing EMI burden exceeding 50% of salary')
+        
+        # Verify only the existing loan exists (no new loan created)
+        self.assertEqual(Loan.objects.count(), 1)
+    
+    def test_create_loan_interest_rate_correction(self):
+        """Test loan creation with interest rate correction for medium credit score"""
+        # Create loan history to get credit score in 30-50 range
+        # Keep EMI burden under 50% to avoid rejection
+        Loan.objects.create(
+            customer=self.customer,
+            loan_amount=1000000,
+            tenure=24,
+            interest_rate=10.0,
+            monthly_repayment=20000,  # 20% of salary
+            emis_paid_on_time=8,  # 33% payment rate - poor
+            start_date=date(2023, 1, 1),
+            end_date=date(2024, 12, 31)
+        )
+        
+        # Create second loan with poor payment
+        Loan.objects.create(
+            customer=self.customer,
+            loan_amount=500000,
+            tenure=12,
+            interest_rate=12.0,
+            monthly_repayment=20000,  # Total EMI: 40% of salary - within limit
+            emis_paid_on_time=3,  # 25% payment rate - poor
+            start_date=date(2022, 1, 1),
+            end_date=date(2022, 12, 31)
+        )
+        
+        # Higher debt utilization to reduce score further
+        self.customer.current_debt = 3200000  # ~89% of approved limit
+        self.customer.save()
+        
+        low_rate_request = self.valid_request.copy()
+        low_rate_request['interest_rate'] = 8.0  # Below 12%
+        
+        response = self.client.post(
+            self.url,
+            data=json.dumps(low_rate_request),
+            content_type='application/json'
+        )
+        
+        self.assertEqual(response.status_code, 201)
+        response_data = json.loads(response.content)
+        
+        self.assertTrue(response_data['loan_approved'])
+        self.assertIsNotNone(response_data['loan_id'])
+        
+        # Verify loan was created with corrected interest rate
+        loan = Loan.objects.get(loan_id=response_data['loan_id'])
+        self.assertEqual(loan.interest_rate, 12.0)  # Corrected to 12%
+    
+    def test_create_loan_missing_fields(self):
+        """Test loan creation with missing required fields"""
+        incomplete_request = {
+            'customer_id': self.customer.customer_id,
+            'loan_amount': 500000
+            # Missing interest_rate and tenure
+        }
+        
+        response = self.client.post(
+            self.url,
+            data=json.dumps(incomplete_request),
+            content_type='application/json'
+        )
+        
+        self.assertEqual(response.status_code, 400)
+        response_data = json.loads(response.content)
+        self.assertEqual(response_data['error'], 'Missing required fields')
+    
+    def test_create_loan_low_credit_score(self):
+        """Test loan creation for customer with very low credit score <= 10"""
+        # To get credit score <= 10, we need to minimize all components:
+        # 1. Payment history: 0% (0 points)
+        # 2. Loan count: 15+ loans (0 points) 
+        # 3. Recent activity: Many recent loans (0 points)
+        # 4. Volume ratio: Near 100% utilization (near 0 points)
+        
+        # Create 20 loans with 0% payment history, many in current year
+        current_year = date.today().year
+        for i in range(20):
+            Loan.objects.create(
+                customer=self.customer,
+                loan_amount=50000,
+                tenure=12,
+                interest_rate=16.0,
+                monthly_repayment=2000,  # Total EMI will be 40000 (40% of salary)
+                emis_paid_on_time=0,  # 0% payment rate
+                start_date=date(current_year, 1, 1),  # All in current year for penalty
+                end_date=date(current_year, 12, 31)
+            )
+        
+        # Maximum debt utilization (99.9% of limit) to minimize volume score
+        self.customer.current_debt = 3596400  # 99.9% of 3600000
+        self.customer.save()
+        
+        response = self.client.post(
+            self.url,
+            data=json.dumps(self.valid_request),
+            content_type='application/json'
+        )
+        
+        self.assertEqual(response.status_code, 200)
+        response_data = json.loads(response.content)
+        
+        self.assertIsNone(response_data['loan_id'])
+        self.assertFalse(response_data['loan_approved'])
+        self.assertEqual(response_data['message'], 'Loan not approved due to low credit score')
+        
+        # Verify only existing loans exist (no new loan created)
+        self.assertEqual(Loan.objects.count(), 20)

@@ -1,6 +1,7 @@
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
+from django.test import RequestFactory
 from loans.models import Customer, Loan
 from loans.helper import calculate_credit_score
 from datetime import datetime
@@ -49,7 +50,6 @@ def register_customer(request):
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
     
-
 
 @csrf_exempt
 @require_http_methods(["POST"])
@@ -125,14 +125,25 @@ def check_eligibility(request):
         except ZeroDivisionError:
             monthly_installment = 0.0
 
-        # --- Step 6: Determine Approval Status ---
+        # --- Step 6: Determine Approval Status Based on Credit Score ---
         approval = False
+        reason = ""
+        
         if credit_score > 50:
             approval = True
-        elif 30 < credit_score <= 50 and corrected_interest_rate >= 12:
-            approval = True
-        elif 10 < credit_score <= 30 and corrected_interest_rate >= 16:
-            approval = True
+        elif 30 < credit_score <= 50:
+            if corrected_interest_rate >= 12:
+                approval = True
+            else:
+                reason = "Interest rate too low for credit score range 30-50"
+        elif 10 < credit_score <= 30:
+            if corrected_interest_rate >= 16:
+                approval = True
+            else:
+                reason = "Interest rate too low for credit score range 10-30"
+        else:  # credit_score <= 10
+            approval = False
+            reason = "Credit score too low (≤10)"
 
         # --- Step 7: Prepare Response ---
         response = {
@@ -144,10 +155,107 @@ def check_eligibility(request):
             "monthly_installment": round(monthly_installment, 2)
         }
 
-        if not approval:
+        if not approval and reason:
+            response["reason"] = reason
+        elif not approval:
             response["reason"] = "Credit score too low"
 
         return JsonResponse(response, status=200)
+
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=400)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def create_loan(request):
+    """Create a new loan based on eligibility check"""
+    try:
+        # Parse request
+        data = json.loads(request.body)
+        customer_id = data.get('customer_id')
+        loan_amount = data.get('loan_amount')
+        interest_rate = data.get('interest_rate')
+        tenure = data.get('tenure')
+
+        # Validate required fields
+        if not all([customer_id, loan_amount, interest_rate, tenure]):
+            return JsonResponse({"error": "Missing required fields"}, status=400)
+
+
+        
+        # Create a mock request for the eligibility check
+        factory = RequestFactory()
+        eligibility_request = factory.post('/check-eligibility/', 
+                                         json.dumps(data), 
+                                         content_type='application/json')
+        
+        # Call check_eligibility function directly
+        eligibility_response = check_eligibility(eligibility_request)
+        eligibility_data = json.loads(eligibility_response.content)
+        
+        # Handle non-200 responses from eligibility check
+        if eligibility_response.status_code != 200:
+            return eligibility_response
+
+        # Check if loan is approved
+        if not eligibility_data.get("approval", False):
+            # Map reason to appropriate message
+            reason = eligibility_data.get("reason", "")
+            if "Overutilized credit limit" in reason:
+                message = "Loan not approved due to overutilized credit limit"
+            elif "EMI burden" in reason:
+                message = "Loan not approved due to existing EMI burden exceeding 50% of salary"
+            else:
+                message = "Loan not approved due to low credit score"
+            
+            return JsonResponse({
+                "loan_id": None,
+                "customer_id": customer_id,
+                "loan_approved": False,
+                "message": message,
+                "monthly_installment": 0.0
+            }, status=200)
+
+        # --- Create Loan if Approved ---
+        # Get customer instance
+        customer = Customer.objects.get(customer_id=customer_id)
+        
+        corrected_interest_rate = eligibility_data["corrected_interest_rate"]
+        monthly_installment = eligibility_data["monthly_installment"]
+        loan_amount = float(loan_amount)
+        tenure = int(tenure)
+        
+        # Calculate loan dates
+        from datetime import date
+        from dateutil.relativedelta import relativedelta
+        
+        start_date = date.today()
+        end_date = start_date + relativedelta(months=tenure)
+        
+        # Create the loan
+        loan = Loan.objects.create(
+            customer=customer,
+            loan_amount=loan_amount,
+            tenure=tenure,
+            interest_rate=corrected_interest_rate,  # Use corrected rate
+            monthly_repayment=round(monthly_installment, 2),
+            emis_paid_on_time=0,  # New loan, no EMIs paid yet
+            start_date=start_date,
+            end_date=end_date
+        )
+        
+        # Update customer's current debt
+        customer.current_debt += int(loan_amount)
+        customer.save()
+        
+        return JsonResponse({
+            "loan_id": loan.loan_id,
+            "customer_id": customer_id,
+            "loan_approved": True,
+            "message": "Loan approved and created successfully",
+            "monthly_installment": round(monthly_installment, 2)
+        }, status=201)
 
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
