@@ -259,3 +259,37 @@ def create_loan(request):
 
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def view_loan(request, loan_id):
+    """
+    View loan details and customer details for a specific loan ID
+    """
+    try:
+        # Get the loan by ID
+        loan = Loan.objects.select_related('customer').get(loan_id=loan_id)
+        
+        # Prepare response data
+        response_data = {
+            "loan_id": loan.loan_id,
+            "customer": {
+                "id": loan.customer.customer_id,
+                "first_name": loan.customer.first_name,
+                "last_name": loan.customer.last_name,
+                "phone_number": loan.customer.phone_number,
+                "age": loan.customer.age
+            },
+            "loan_amount": loan.loan_amount,
+            "interest_rate": loan.interest_rate,
+            "monthly_installment": loan.monthly_repayment,
+            "tenure": loan.tenure
+        }
+        
+        return JsonResponse(response_data, status=200)
+        
+    except Loan.DoesNotExist:
+        return JsonResponse({"error": "Loan not found"}, status=404)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=400)

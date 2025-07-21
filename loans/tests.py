@@ -738,3 +738,197 @@ class CreateLoanViewTest(TestCase):
         
         # Verify only existing loans exist (no new loan created)
         self.assertEqual(Loan.objects.count(), 20)
+
+
+class ViewLoanViewTest(TestCase):
+    """Test cases for view loan view"""
+    
+    def setUp(self):
+        self.client = Client()
+        self.customer = Customer.objects.create(
+            first_name='John',
+            last_name='Doe',
+            age=30,
+            phone_number='1234567890',
+            monthly_salary=100000,
+            approved_limit=3600000,
+            current_debt=500000
+        )
+        
+        self.loan = Loan.objects.create(
+            customer=self.customer,
+            loan_amount=500000,
+            tenure=24,
+            interest_rate=12.0,
+            monthly_repayment=25000,
+            emis_paid_on_time=12,
+            start_date=date(2024, 1, 1),
+            end_date=date(2025, 12, 31)
+        )
+        
+        self.url = reverse('view_loan', kwargs={'loan_id': self.loan.loan_id})
+    
+    def test_view_loan_success(self):
+        """Test successful loan detail retrieval"""
+        response = self.client.get(self.url)
+        
+        self.assertEqual(response.status_code, 200)
+        response_data = json.loads(response.content)
+        
+        # Check loan details
+        self.assertEqual(response_data['loan_id'], self.loan.loan_id)
+        self.assertEqual(response_data['loan_amount'], 500000.0)
+        self.assertEqual(response_data['interest_rate'], 12.0)
+        self.assertEqual(response_data['monthly_installment'], 25000.0)
+        self.assertEqual(response_data['tenure'], 24)
+        
+        # Check customer details in response
+        customer_data = response_data['customer']
+        self.assertEqual(customer_data['id'], self.customer.customer_id)
+        self.assertEqual(customer_data['first_name'], 'John')
+        self.assertEqual(customer_data['last_name'], 'Doe')
+        self.assertEqual(customer_data['phone_number'], '1234567890')
+        self.assertEqual(customer_data['age'], 30)
+    
+    def test_view_loan_not_found(self):
+        """Test loan detail retrieval for non-existent loan"""
+        non_existent_url = reverse('view_loan', kwargs={'loan_id': 99999})
+        response = self.client.get(non_existent_url)
+        
+        self.assertEqual(response.status_code, 404)
+        response_data = json.loads(response.content)
+        self.assertEqual(response_data['error'], 'Loan not found')
+    
+    def test_view_loan_invalid_loan_id(self):
+        """Test loan detail retrieval with invalid loan ID format"""
+        # This should be handled by Django's URL pattern validation
+        # but we can test with a string that doesn't match int pattern
+        invalid_url = '/view-loan/invalid_id/'
+        response = self.client.get(invalid_url)
+        
+        # Should return 404 as URL pattern won't match
+        self.assertEqual(response.status_code, 404)
+    
+    def test_view_loan_response_structure(self):
+        """Test that the response contains all required fields"""
+        response = self.client.get(self.url)
+        
+        self.assertEqual(response.status_code, 200)
+        response_data = json.loads(response.content)
+        
+        # Check all required fields are present
+        required_fields = ['loan_id', 'customer', 'loan_amount', 'interest_rate', 'monthly_installment', 'tenure']
+        for field in required_fields:
+            self.assertIn(field, response_data)
+        
+        # Check customer object has required fields
+        customer_required_fields = ['id', 'first_name', 'last_name', 'phone_number', 'age']
+        customer_data = response_data['customer']
+        for field in customer_required_fields:
+            self.assertIn(field, customer_data)
+    
+    def test_view_loan_multiple_loans_same_customer(self):
+        """Test viewing specific loan when customer has multiple loans"""
+        # Create another loan for the same customer
+        loan2 = Loan.objects.create(
+            customer=self.customer,
+            loan_amount=300000,
+            tenure=12,
+            interest_rate=10.5,
+            monthly_repayment=27000,
+            emis_paid_on_time=6,
+            start_date=date(2023, 6, 1),
+            end_date=date(2024, 5, 31)
+        )
+        
+        # Test viewing the first loan
+        response1 = self.client.get(self.url)
+        self.assertEqual(response1.status_code, 200)
+        data1 = json.loads(response1.content)
+        self.assertEqual(data1['loan_id'], self.loan.loan_id)
+        self.assertEqual(data1['loan_amount'], 500000.0)
+        
+        # Test viewing the second loan
+        url2 = reverse('view_loan', kwargs={'loan_id': loan2.loan_id})
+        response2 = self.client.get(url2)
+        self.assertEqual(response2.status_code, 200)
+        data2 = json.loads(response2.content)
+        self.assertEqual(data2['loan_id'], loan2.loan_id)
+        self.assertEqual(data2['loan_amount'], 300000.0)
+        
+        # Both should have the same customer data
+        self.assertEqual(data1['customer'], data2['customer'])
+
+
+class CompleteWorkflowTest(TestCase):
+    """Integration test for the complete loan workflow including view_loan"""
+    
+    def test_complete_workflow_with_view_loan(self):
+        """Test complete workflow: register → create_loan → view_loan"""
+        client = Client()
+        
+        # Step 1: Register customer
+        register_data = {
+            'first_name': 'Complete',
+            'last_name': 'Workflow',
+            'age': 35,
+            'monthly_income': 90000,
+            'phone_number': '8888888888'
+        }
+        
+        register_response = client.post(
+            reverse('register'),
+            data=json.dumps(register_data),
+            content_type='application/json'
+        )
+        
+        self.assertEqual(register_response.status_code, 201)
+        customer_data = json.loads(register_response.content)
+        customer_id = customer_data['customer_id']
+        
+        # Step 2: Create loan
+        loan_data = {
+            'customer_id': customer_id,
+            'loan_amount': 800000,
+            'interest_rate': 11.0,
+            'tenure': 36
+        }
+        
+        create_loan_response = client.post(
+            reverse('create_loan'),
+            data=json.dumps(loan_data),
+            content_type='application/json'
+        )
+        
+        self.assertEqual(create_loan_response.status_code, 201)
+        loan_response_data = json.loads(create_loan_response.content)
+        
+        self.assertTrue(loan_response_data['loan_approved'])
+        loan_id = loan_response_data['loan_id']
+        self.assertIsNotNone(loan_id)
+        
+        # Step 3: View loan details
+        view_loan_response = client.get(reverse('view_loan', kwargs={'loan_id': loan_id}))
+        
+        self.assertEqual(view_loan_response.status_code, 200)
+        view_data = json.loads(view_loan_response.content)
+        
+        # Verify loan details match what was created
+        self.assertEqual(view_data['loan_id'], loan_id)
+        self.assertEqual(view_data['loan_amount'], 800000.0)
+        self.assertEqual(view_data['tenure'], 36)
+        
+        # New customer should get corrected interest rate of 12% since credit score = 50
+        # which falls in 30 < score <= 50 range and original rate (11%) < 12%
+        self.assertEqual(view_data['interest_rate'], 12.0)
+        
+        # Verify customer details
+        customer_info = view_data['customer']
+        self.assertEqual(customer_info['id'], customer_id)
+        self.assertEqual(customer_info['first_name'], 'Complete')
+        self.assertEqual(customer_info['last_name'], 'Workflow')
+        self.assertEqual(customer_info['phone_number'], '8888888888')
+        self.assertEqual(customer_info['age'], 35)
+        
+        # Verify monthly installment is present and positive
+        self.assertGreater(view_data['monthly_installment'], 0)

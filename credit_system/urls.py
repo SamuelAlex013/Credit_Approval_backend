@@ -21,6 +21,7 @@ from django.urls import path
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('register/', views.register_customer, name='register'),
-    path('check_eligibility/', views.check_eligibility, name='check_eligibility'),
+    path('check-eligibility/', views.check_eligibility, name='check_eligibility'),
     path('create-loan/', views.create_loan, name='create_loan'),
+    path('view-loan/<int:loan_id>/', views.view_loan, name='view_loan'),
 ]
