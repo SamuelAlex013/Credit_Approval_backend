@@ -932,3 +932,247 @@ class CompleteWorkflowTest(TestCase):
         
         # Verify monthly installment is present and positive
         self.assertGreater(view_data['monthly_installment'], 0)
+    
+    def test_complete_workflow_with_view_loans(self):
+        """Test complete workflow: register → create_loan → view_loans"""
+        client = Client()
+        
+        # Step 1: Register customer
+        register_data = {
+            'first_name': 'Multi',
+            'last_name': 'Loan',
+            'age': 40,
+            'monthly_income': 100000,
+            'phone_number': '7777777777'
+        }
+        
+        register_response = client.post(
+            reverse('register'),
+            data=json.dumps(register_data),
+            content_type='application/json'
+        )
+        
+        self.assertEqual(register_response.status_code, 201)
+        customer_data = json.loads(register_response.content)
+        customer_id = customer_data['customer_id']
+        
+        # Step 2: Create first loan
+        loan1_data = {
+            'customer_id': customer_id,
+            'loan_amount': 400000,
+            'interest_rate': 10.0,
+            'tenure': 24
+        }
+        
+        create_loan1_response = client.post(
+            reverse('create_loan'),
+            data=json.dumps(loan1_data),
+            content_type='application/json'
+        )
+        
+        self.assertEqual(create_loan1_response.status_code, 201)
+        loan1_response_data = json.loads(create_loan1_response.content)
+        
+        # Step 3: Create second loan
+        loan2_data = {
+            'customer_id': customer_id,
+            'loan_amount': 200000,
+            'interest_rate': 11.0,
+            'tenure': 12
+        }
+        
+        create_loan2_response = client.post(
+            reverse('create_loan'),
+            data=json.dumps(loan2_data),
+            content_type='application/json'
+        )
+        
+        self.assertEqual(create_loan2_response.status_code, 201)
+        loan2_response_data = json.loads(create_loan2_response.content)
+        
+        # Step 4: View all loans for customer
+        view_loans_response = client.get(reverse('view_loans_by_customer', kwargs={'customer_id': customer_id}))
+        
+        self.assertEqual(view_loans_response.status_code, 200)
+        loans_data = json.loads(view_loans_response.content)
+        
+        # Verify we get both loans
+        self.assertIsInstance(loans_data, list)
+        self.assertEqual(len(loans_data), 2)
+        
+        # Verify loan IDs match what was created
+        loan_ids = [loan['loan_id'] for loan in loans_data]
+        self.assertIn(loan1_response_data['loan_id'], loan_ids)
+        self.assertIn(loan2_response_data['loan_id'], loan_ids)
+        
+        # Verify all fields are present
+        for loan in loans_data:
+            self.assertIn('loan_id', loan)
+            self.assertIn('loan_amount', loan)
+            self.assertIn('interest_rate', loan)
+            self.assertIn('monthly_installment', loan)
+            self.assertIn('repayments_left', loan)
+            
+            # All new loans should have full tenure as repayments_left
+            self.assertGreater(loan['repayments_left'], 0)
+
+
+class ViewLoansByCustomerViewTest(TestCase):
+    """Test cases for view loans by customer view"""
+    
+    def setUp(self):
+        self.client = Client()
+        self.customer = Customer.objects.create(
+            first_name='Jane',
+            last_name='Smith',
+            age=28,
+            phone_number='9876543210',
+            monthly_salary=80000,
+            approved_limit=2880000,
+            current_debt=800000
+        )
+        
+        # Create multiple loans for this customer
+        self.loan1 = Loan.objects.create(
+            customer=self.customer,
+            loan_amount=500000,
+            tenure=24,
+            interest_rate=12.0,
+            monthly_repayment=25000,
+            emis_paid_on_time=10,
+            start_date=date(2024, 1, 1),
+            end_date=date(2025, 12, 31)
+        )
+        
+        self.loan2 = Loan.objects.create(
+            customer=self.customer,
+            loan_amount=300000,
+            tenure=12,
+            interest_rate=10.5,
+            monthly_repayment=27000,
+            emis_paid_on_time=6,
+            start_date=date(2023, 6, 1),
+            end_date=date(2024, 5, 31)
+        )
+        
+        self.url = reverse('view_loans_by_customer', kwargs={'customer_id': self.customer.customer_id})
+    
+    def test_view_loans_by_customer_success(self):
+        """Test successful retrieval of all loans for a customer"""
+        response = self.client.get(self.url)
+        
+        self.assertEqual(response.status_code, 200)
+        response_data = json.loads(response.content)
+        
+        # Should return a list of loans
+        self.assertIsInstance(response_data, list)
+        self.assertEqual(len(response_data), 2)
+        
+        # Check loan details (order might vary, so check both loans exist)
+        loan_ids = [loan['loan_id'] for loan in response_data]
+        self.assertIn(self.loan1.loan_id, loan_ids)
+        self.assertIn(self.loan2.loan_id, loan_ids)
+        
+        # Check structure of first loan item
+        loan_item = response_data[0]
+        required_fields = ['loan_id', 'loan_amount', 'interest_rate', 'monthly_installment', 'repayments_left']
+        for field in required_fields:
+            self.assertIn(field, loan_item)
+    
+    def test_view_loans_by_customer_repayments_calculation(self):
+        """Test that repayments_left is calculated correctly"""
+        response = self.client.get(self.url)
+        
+        self.assertEqual(response.status_code, 200)
+        response_data = json.loads(response.content)
+        
+        # Find loan1 in response
+        loan1_data = next(loan for loan in response_data if loan['loan_id'] == self.loan1.loan_id)
+        
+        # loan1: tenure=24, emis_paid_on_time=10, so repayments_left = 24-10 = 14
+        self.assertEqual(loan1_data['repayments_left'], 14)
+        
+        # Find loan2 in response
+        loan2_data = next(loan for loan in response_data if loan['loan_id'] == self.loan2.loan_id)
+        
+        # loan2: tenure=12, emis_paid_on_time=6, so repayments_left = 12-6 = 6
+        self.assertEqual(loan2_data['repayments_left'], 6)
+    
+    def test_view_loans_by_customer_not_found(self):
+        """Test loans retrieval for non-existent customer"""
+        non_existent_url = reverse('view_loans_by_customer', kwargs={'customer_id': 99999})
+        response = self.client.get(non_existent_url)
+        
+        self.assertEqual(response.status_code, 404)
+        response_data = json.loads(response.content)
+        self.assertEqual(response_data['error'], 'Customer not found')
+    
+    def test_view_loans_empty_list_for_customer_with_no_loans(self):
+        """Test loans retrieval for customer with no loans"""
+        # Create customer with no loans
+        customer_no_loans = Customer.objects.create(
+            first_name='Empty',
+            last_name='Loans',
+            age=30,
+            phone_number='1111111111',
+            monthly_salary=50000,
+            approved_limit=1800000,
+            current_debt=0
+        )
+        
+        url = reverse('view_loans_by_customer', kwargs={'customer_id': customer_no_loans.customer_id})
+        response = self.client.get(url)
+        
+        self.assertEqual(response.status_code, 200)
+        response_data = json.loads(response.content)
+        
+        # Should return empty list
+        self.assertIsInstance(response_data, list)
+        self.assertEqual(len(response_data), 0)
+    
+    def test_view_loans_by_customer_all_fields_present(self):
+        """Test that all required fields are present in loan items"""
+        response = self.client.get(self.url)
+        
+        self.assertEqual(response.status_code, 200)
+        response_data = json.loads(response.content)
+        
+        for loan_item in response_data:
+            # Check all required fields according to specification
+            self.assertIn('loan_id', loan_item)
+            self.assertIn('loan_amount', loan_item)
+            self.assertIn('interest_rate', loan_item)
+            self.assertIn('monthly_installment', loan_item)
+            self.assertIn('repayments_left', loan_item)
+            
+            # Check data types
+            self.assertIsInstance(loan_item['loan_id'], int)
+            self.assertIsInstance(loan_item['loan_amount'], (int, float))
+            self.assertIsInstance(loan_item['interest_rate'], (int, float))
+            self.assertIsInstance(loan_item['monthly_installment'], (int, float))
+            self.assertIsInstance(loan_item['repayments_left'], int)
+    
+    def test_view_loans_by_customer_fully_paid_loan(self):
+        """Test repayments_left calculation for fully paid loan"""
+        # Create a fully paid loan
+        fully_paid_loan = Loan.objects.create(
+            customer=self.customer,
+            loan_amount=100000,
+            tenure=6,
+            interest_rate=15.0,
+            monthly_repayment=18000,
+            emis_paid_on_time=6,  # All EMIs paid
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 6, 30)
+        )
+        
+        response = self.client.get(self.url)
+        
+        self.assertEqual(response.status_code, 200)
+        response_data = json.loads(response.content)
+        
+        # Find the fully paid loan
+        fully_paid_data = next(loan for loan in response_data if loan['loan_id'] == fully_paid_loan.loan_id)
+        
+        # Should have 0 repayments left
+        self.assertEqual(fully_paid_data['repayments_left'], 0)

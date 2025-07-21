@@ -293,3 +293,40 @@ def view_loan(request, loan_id):
         return JsonResponse({"error": "Loan not found"}, status=404)
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def view_loans_by_customer(request, customer_id):
+    """
+    View all current loan details for a specific customer ID
+    """
+    try:
+        # Check if customer exists
+        try:
+            customer = Customer.objects.get(customer_id=customer_id)
+        except Customer.DoesNotExist:
+            return JsonResponse({"error": "Customer not found"}, status=404)
+        
+        # Get all loans for this customer
+        loans = Loan.objects.filter(customer=customer)
+        
+        # Prepare response data - list of loan items
+        loan_list = []
+        for loan in loans:
+            # Calculate remaining EMIs
+            remaining_emis = max(0, loan.tenure - loan.emis_paid_on_time)
+            
+            loan_item = {
+                "loan_id": loan.loan_id,
+                "loan_amount": loan.loan_amount,
+                "interest_rate": loan.interest_rate,
+                "monthly_installment": loan.monthly_repayment,
+                "repayments_left": remaining_emis
+            }
+            loan_list.append(loan_item)
+        
+        return JsonResponse(loan_list, safe=False, status=200)
+        
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=400)
